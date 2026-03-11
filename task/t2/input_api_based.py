@@ -59,11 +59,33 @@ USER_PROMPT = """## RAG CONTEXT:
 {query}"""
 
 
-#TODO:
-# 1. Create AzureChatOpenAI client
-# 2. Create UserClient
+class SearchField(StrEnum):
+    NAME = "name"
+    SURNAME = "surname"
+    EMAIL = "email"
 
 
+class SearchRequest(BaseModel):
+    search_field: SearchField = Field(description="Search field")
+    search_value: str = Field(description="Search value. Sample: Adam.")
+
+
+class SearchRequests(BaseModel):
+    search_request_parameters: list[SearchRequest] = Field(
+        description="List of search parameters to execute",
+        default_factory=list
+    )
+
+
+llm_client = AzureChatOpenAI(
+    temperature=0.0,
+    azure_deployment='gpt-4o',
+    azure_endpoint=DIAL_URL,
+    api_key=SecretStr(API_KEY),
+    api_version="",
+)
+
+user_client = UserClient()
 #TODO:
 # Now we need to create pydentic models that will be user for search and their JSON schema will be passed to LLM by
 # langchain. In response from LLM we expect to get response in such format (JSON by JSON Schema)
@@ -78,6 +100,23 @@ USER_PROMPT = """## RAG CONTEXT:
 
 def retrieve_context(user_question: str) -> list[dict[str, Any]]:
     """Extract search parameters from user query and retrieve matching users."""
+    parser = PydanticOutputParser(pydantic_object=SearchRequests)
+    messages = [
+        SystemMessagePromptTemplate.from_template(QUERY_ANALYSIS_PROMPT),
+        HumanMessage(content=user_question)
+    ]
+    prompt = ChatPromptTemplate.from_messages(messages=messages).partial(format_instructions=parser.get_format_instructions())
+    search_requests: SearchRequests = (prompt | llm_client | parser).invoke({})
+
+    if len(search_requests.search_request_parameters) > 0:
+        request_dict = {}
+        for (search_request_parameter) in search_requests.search_request_parameters:
+            request_dict[search_request_parameter.search_field.value] = search_request_parameter.search_value
+        print(f"request dict: {request_dict}")
+        return user_client.search_users(**request_dict)
+    else:
+        print("No specific search parameters found!")
+        return []
     #TODO:
     # 1. Create PydanticOutputParser with `pydantic_object=SearchRequests` as `parser`
     # 2. Create messages array with:
@@ -93,28 +132,53 @@ def retrieve_context(user_question: str) -> list[dict[str, Any]]:
     #       - search users (**requests_dict) with `user_client`
     #       - return users that you found
     # 6. Otherwise print 'No specific search parameters found!' and return empty array
-    raise NotImplementedError
 
 
 def augment_prompt(user_question: str, context: list[dict[str, Any]]) -> str:
     """Combine user query with retrieved context into a formatted prompt."""
+    context_str = join_context(context)
+    augmented = USER_PROMPT.replace("{context}", context_str).replace("{query}", user_question)
+    print(f"augmented prompt: {augmented}")
+    return augmented
+
     #TODO:
     # 1. Prepare context from users JSONs in the same way as in `no_grounding.py` `join_context` method (collect as one string)
     # 2. Make augmentation for USER_PROMPT
     # 3. print augmented prompt
     # 3. return augmented prompt
-    raise NotImplementedError
 
+def join_context(context: list[dict[str, Any]]) -> str:
+    formatted = []
+
+    for user in context:
+        formatted.append(
+            f"""
+            User:
+              name: {user['name']}
+              surname: {user['surname']}
+              about_me: {user['about_me']}
+              gender: {user['gender']}
+              email: {user['email']}
+              company: {user['company']}
+              salary: {user['salary']}
+            """)
+    return "\n\n".join(formatted)
 
 def generate_answer(augmented_prompt: str) -> str:
     """Generate final answer using the augmented prompt."""
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=augmented_prompt)
+    ]
+    result = llm_client.invoke(input=messages)
+    print(f"response content: {result.content}")
+    return result.content
     #TODO:
     # 1. Create messages array with:
     #       - SYSTEM_PROMPT
     #       - augmented_prompt
     # 2. Generate response, use invoke method with llm_client
     # 3. Return response content
-    raise NotImplementedError
 
 
 def main():
@@ -124,6 +188,15 @@ def main():
     print(" - Find users with surname Adams")
     print(" - Do we have smbd with name John that love painting?")
 
+    while True:
+        user_question = input("> ")
+        print("========= searching user database...")
+        context = retrieve_context(user_question)
+        if len(context) > 0:
+            augmented_prompt = augment_prompt(user_question, context)
+            generate_answer(augmented_prompt)
+        else:
+            print("========= No relevant information found")
     #TODO:
     # 1. Create infinite loop
     # 2. Get input from console as `user_question`
@@ -132,7 +205,6 @@ def main():
     #       - make augmentation
     #       - generate answer with augmented prompt
     # 5. Otherwise print `No relevant information found`
-    raise NotImplementedError
 
 
 if __name__ == "__main__":
